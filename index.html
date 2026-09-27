@@ -295,9 +295,162 @@
       canvas.height = window.innerHeight;
     });
 
+    // ==================== SIMPLE 3D ENGINE ====================
+    class Vec3 {
+      constructor(x = 0, y = 0, z = 0) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+      }
+
+      add(v) {
+        return new Vec3(this.x + v.x, this.y + v.y, this.z + v.z);
+      }
+
+      sub(v) {
+        return new Vec3(this.x - v.x, this.y - v.y, this.z - v.z);
+      }
+
+      scale(s) {
+        return new Vec3(this.x * s, this.y * s, this.z * s);
+      }
+    }
+
+    class Cube {
+      constructor(x, y, z, width, height, depth, color) {
+        this.pos = new Vec3(x, y, z);
+        this.w = width;
+        this.h = height;
+        this.d = depth;
+        this.color = color;
+        this.rotX = 0;
+        this.rotY = 0;
+        this.rotZ = 0;
+      }
+
+      getVertices() {
+        const hw = this.w / 2;
+        const hh = this.h / 2;
+        const hd = this.d / 2;
+
+        let vertices = [
+          new Vec3(-hw, -hh, -hd),
+          new Vec3(hw, -hh, -hd),
+          new Vec3(hw, hh, -hd),
+          new Vec3(-hw, hh, -hd),
+          new Vec3(-hw, -hh, hd),
+          new Vec3(hw, -hh, hd),
+          new Vec3(hw, hh, hd),
+          new Vec3(-hw, hh, hd)
+        ];
+
+        // Rotation X
+        let cosX = Math.cos(this.rotX);
+        let sinX = Math.sin(this.rotX);
+        vertices = vertices.map(v => {
+          let ny = v.y * cosX - v.z * sinX;
+          let nz = v.y * sinX + v.z * cosX;
+          return new Vec3(v.x, ny, nz);
+        });
+
+        // Rotation Y
+        let cosY = Math.cos(this.rotY);
+        let sinY = Math.sin(this.rotY);
+        vertices = vertices.map(v => {
+          let nx = v.x * cosY + v.z * sinY;
+          let nz = -v.x * sinY + v.z * cosY;
+          return new Vec3(nx, v.y, nz);
+        });
+
+        // Rotation Z
+        let cosZ = Math.cos(this.rotZ);
+        let sinZ = Math.sin(this.rotZ);
+        vertices = vertices.map(v => {
+          let nx = v.x * cosZ - v.y * sinZ;
+          let ny = v.x * sinZ + v.y * cosZ;
+          return new Vec3(nx, ny, v.z);
+        });
+
+        // Translate
+        return vertices.map(v => v.add(this.pos));
+      }
+
+      project(camera) {
+        const vertices = this.getVertices();
+        const projected = [];
+
+        for (let v of vertices) {
+          const rel = v.sub(camera);
+          if (rel.z <= 0.1) continue; // Behind camera
+
+          const scale = camera.z / (rel.z + 300);
+          const x = canvas.width / 2 + rel.x * scale;
+          const y = canvas.height / 2 - rel.y * scale;
+          const z = rel.z;
+
+          projected.push({ x, y, z, original: rel });
+        }
+
+        return projected;
+      }
+    }
+
+    function drawCube3D(cube, camera) {
+      const proj = cube.project(camera);
+      if (proj.length === 0) return;
+
+      // Draw cube faces
+      const edges = [
+        [0, 1], [1, 2], [2, 3], [3, 0], // Front
+        [4, 5], [5, 6], [6, 7], [7, 4], // Back
+        [0, 4], [1, 5], [2, 6], [3, 7]  // Sides
+      ];
+
+      ctx.strokeStyle = '#0ff';
+      ctx.lineWidth = 2;
+      ctx.fillStyle = cube.color;
+
+      // Simple face rendering
+      const faces = [
+        [0, 1, 2, 3], // Front
+        [4, 5, 6, 7], // Back
+        [0, 1, 5, 4], // Bottom
+        [3, 2, 6, 7], // Top
+        [0, 3, 7, 4], // Left
+        [1, 2, 6, 5]  // Right
+      ];
+
+      for (let face of faces) {
+        if (face.every(i => i < proj.length)) {
+          ctx.beginPath();
+          ctx.moveTo(proj[face[0]].x, proj[face[0]].y);
+          for (let i = 1; i < face.length; i++) {
+            ctx.lineTo(proj[face[i]].x, proj[face[i]].y);
+          }
+          ctx.closePath();
+          
+          // Calculate face brightness based on depth
+          const avgZ = face.reduce((sum, i) => sum + proj[i].z, 0) / face.length;
+          const brightness = Math.max(0.3, 1 - avgZ / 1000);
+          
+          ctx.fillStyle = adjustBrightness(cube.color, brightness);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
+
+    function adjustBrightness(color, brightness) {
+      const c = parseInt(color.replace('#', ''), 16);
+      const r = Math.floor(((c >> 16) & 255) * brightness);
+      const g = Math.floor(((c >> 8) & 255) * brightness);
+      const b = Math.floor((c & 255) * brightness);
+      return `rgb(${r},${g},${b})`;
+    }
+
     // ==================== GAME STATE ====================
     const gameState = {
-      mode: 'menu', // menu, playing, gameover
+      mode: 'menu',
       distance: 0,
       speed: 0,
       targetSpeed: 0,
@@ -326,57 +479,23 @@
       space: false
     };
 
-    // ==================== 3D ROAD SYSTEM ====================
     const roadSegments = [];
-    const roadConfig = {
-      segmentLength: 100,
-      roadWidth: 300,
-      lanes: 3,
-      laneWidth: 100
-    };
-
     const obstacles = [];
+    const camera = new Vec3(0, 30, 0);
 
-    function generateRoadSegments() {
+    // ==================== ROAD GENERATION ====================
+    function generateRoad() {
       roadSegments.length = 0;
-      for (let i = 0; i < 150; i++) {
-        roadSegments.push({
-          z: i * roadConfig.segmentLength,
-          wobble: Math.sin(i * 0.15) * 40,
-          width: roadConfig.roadWidth,
-          curve: Math.sin(i * 0.08) * 0.3
-        });
+      for (let i = -50; i < 150; i++) {
+        const z = i * 100;
+        const wobble = Math.sin(i * 0.15) * 20;
+        
+        const leftEdge = new Cube(wobble - 200, -5, z, 20, 10, 100, '#333');
+        const rightEdge = new Cube(wobble + 200, -5, z, 20, 10, 100, '#333');
+        const road = new Cube(wobble, -5, z, 400, 10, 100, '#2a2a2a');
+        
+        roadSegments.push({ left: leftEdge, right: rightEdge, road: road, z });
       }
-    }
-
-    function screenToRoad(x, z) {
-      const depth = z / (canvas.height - 100);
-      const horizonY = 100;
-      const centerX = canvas.width / 2;
-      const screenY = horizonY + depth * (canvas.height - horizonY);
-      const roadScreenWidth = (1 - depth) * canvas.width * 0.8;
-
-      return {
-        x: ((x - centerX) / roadScreenWidth) * roadConfig.roadWidth,
-        screenY: screenY
-      };
-    }
-
-    function roadToScreen(x, z) {
-      const depth = z / (canvas.height - 100);
-      if (depth <= 0 || depth >= 1) return null;
-
-      const horizonY = 100;
-      const centerX = canvas.width / 2;
-      const roadScreenWidth = (1 - depth) * canvas.width * 0.8;
-      const screenY = horizonY + depth * (canvas.height - horizonY);
-      const screenX = centerX + (x / roadConfig.roadWidth) * roadScreenWidth;
-
-      return {
-        x: screenX,
-        y: screenY,
-        width: roadScreenWidth
-      };
     }
 
     // ==================== RENDERING ====================
@@ -389,258 +508,91 @@
         gradient.addColorStop(1, '#0f3460');
       } else {
         gradient.addColorStop(0, '#87ceeb');
-        gradient.addColorStop(0.5, '#d4a574');
-        gradient.addColorStop(1, '#8b6f47');
+        gradient.addColorStop(0.5, '#e0c097');
+        gradient.addColorStop(1, '#d2691e');
       }
       
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // Sun/Moon
-      const sunX = canvas.width * 0.75;
-      const sunY = canvas.height * 0.2;
       ctx.fillStyle = config.nightMode ? '#e0e0e0' : '#ffcc00';
       ctx.beginPath();
-      ctx.arc(sunX, sunY, 40, 0, Math.PI * 2);
+      ctx.arc(canvas.width * 0.75, canvas.height * 0.2, 40, 0, Math.PI * 2);
       ctx.fill();
+    }
 
-      // Stars
-      if (config.nightMode) {
-        ctx.fillStyle = '#fff';
-        for (let i = 0; i < 100; i++) {
-          const x = (i * 73.5) % canvas.width;
-          const y = ((i * 97.3) % 80) + 10;
-          ctx.fillRect(x, y, 1, 1);
+    function drawGame() {
+      drawBackground();
+
+      // Update camera
+      camera.x = gameState.playerLane * 100 - 100;
+      camera.z = gameState.roadPosition;
+      camera.y = 30;
+
+      // Draw road
+      for (let seg of roadSegments) {
+        if (Math.abs(seg.z - camera.z) < 1000) {
+          drawCube3D(seg.road, camera);
+          drawCube3D(seg.left, camera);
+          drawCube3D(seg.right, camera);
         }
       }
 
-      // Horizon line
-      ctx.strokeStyle = config.nightMode ? '#333' : '#999';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, 100);
-      ctx.lineTo(canvas.width, 100);
-      ctx.stroke();
-    }
+      // Draw obstacles
+      for (let obs of obstacles) {
+        drawCube3D(obs.cube, camera);
+      }
 
-    function drawRoad3D() {
-      const cameraZ = gameState.roadPosition;
-      const cameraX = gameState.playerLane * roadConfig.laneWidth - roadConfig.roadWidth / 2;
+      // Draw player car
+      const playerCar = new Cube(
+        gameState.playerLane * 100 - 100,
+        10,
+        gameState.roadPosition + 200,
+        60,
+        30,
+        80,
+        '#0f0'
+      );
+      drawCube3D(playerCar, camera);
 
-      for (let i = 0; i < roadSegments.length; i++) {
-        const seg = roadSegments[i];
-        const nextSeg = roadSegments[i + 1] || seg;
-        
-        const relZ = seg.z - cameraZ;
-        const nextRelZ = nextSeg.z - cameraZ;
-
-        if (relZ > canvas.height || nextRelZ < 0) continue;
-
-        const road1 = roadToScreen(seg.wobble, relZ);
-        const road2 = roadToScreen(nextSeg.wobble, nextRelZ);
-
-        if (!road1 || !road2) continue;
-
-        // Road surface
-        ctx.fillStyle = (Math.floor(i / 2) % 2) === 0 ? '#2a2a2a' : '#333';
-        ctx.beginPath();
-        ctx.moveTo(road1.x - road1.width / 2, road1.y);
-        ctx.lineTo(road1.x + road1.width / 2, road1.y);
-        ctx.lineTo(road2.x + road2.width / 2, road2.y);
-        ctx.lineTo(road2.x - road2.width / 2, road2.y);
-        ctx.closePath();
-        ctx.fill();
-
-        // Grass/shoulders
-        ctx.fillStyle = config.nightMode ? '#1a3a1a' : '#2d5a2d';
-        ctx.beginPath();
-        ctx.moveTo(0, road1.y);
-        ctx.lineTo(road1.x - road1.width / 2, road1.y);
-        ctx.lineTo(road2.x - road2.width / 2, road2.y);
-        ctx.lineTo(0, road2.y);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.moveTo(canvas.width, road1.y);
-        ctx.lineTo(road1.x + road1.width / 2, road1.y);
-        ctx.lineTo(road2.x + road2.width / 2, road2.y);
-        ctx.lineTo(canvas.width, road2.y);
-        ctx.closePath();
-        ctx.fill();
-
-        // Lane lines
-        if (i % 2 === 0) {
-          ctx.strokeStyle = config.nightMode ? '#444' : '#ffff00';
-          ctx.lineWidth = 2;
-
-          for (let lane = 1; lane < roadConfig.lanes; lane++) {
-            const laneX1 = road1.x - road1.width / 2 + (lane / roadConfig.lanes) * road1.width;
-            const laneX2 = road2.x - road2.width / 2 + (lane / roadConfig.lanes) * road2.width;
-
-            ctx.setLineDash(i % 4 === 0 ? [8, 8] : []);
-            ctx.beginPath();
-            ctx.moveTo(laneX1, road1.y);
-            ctx.lineTo(laneX2, road2.y);
-            ctx.stroke();
-            ctx.setLineDash([]);
-          }
+      // Speed lines
+      if (gameState.speed > 300) {
+        ctx.strokeStyle = `rgba(0, 255, 255, ${(gameState.speed - 300) / 300 * 0.5})`;
+        ctx.lineWidth = 3;
+        for (let i = 0; i < 5; i++) {
+          const offset = (gameState.roadPosition * 2 + i * 100) % canvas.height;
+          ctx.beginPath();
+          ctx.moveTo(0, offset);
+          ctx.lineTo(canvas.width, offset);
+          ctx.stroke();
         }
-
-        // Edge lines
-        ctx.strokeStyle = config.nightMode ? '#666' : '#ffff00';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(road1.x - road1.width / 2, road1.y);
-        ctx.lineTo(road2.x - road2.width / 2, road2.y);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(road1.x + road1.width / 2, road1.y);
-        ctx.lineTo(road2.x + road2.width / 2, road2.y);
-        ctx.stroke();
       }
 
-      // Trees
-      drawTrees3D();
-    }
-
-    function drawTrees3D() {
-      const cameraZ = gameState.roadPosition;
-      
-      for (let i = 0; i < 30; i++) {
-        const treeZ = i * 300;
-        const relZ = treeZ - cameraZ;
-
-        if (relZ > canvas.height || relZ < 0) continue;
-
-        const leftPos = roadToScreen(-roadConfig.roadWidth * 0.8, relZ);
-        const rightPos = roadToScreen(roadConfig.roadWidth * 0.8, relZ);
-
-        if (!leftPos || !rightPos) continue;
-
-        const scale = leftPos.width / canvas.width * 0.5;
-        
-        // Left trees
-        drawTree(leftPos.x - 30, leftPos.y, scale);
-        drawTree(leftPos.x - 80, leftPos.y, scale * 0.7);
-
-        // Right trees
-        drawTree(rightPos.x + 30, rightPos.y, scale);
-        drawTree(rightPos.x + 80, rightPos.y, scale * 0.7);
+      // Crash flash
+      if (gameState.crashed) {
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
-    }
-
-    function drawTree(x, y, scale) {
-      const w = 30 * scale;
-      const h = 60 * scale;
-
-      // Trunk
-      ctx.fillStyle = '#8b4513';
-      ctx.fillRect(x - w * 0.15, y, w * 0.3, h * 0.4);
-
-      // Foliage
-      ctx.fillStyle = config.nightMode ? '#1a4a1a' : '#228b22';
-      ctx.beginPath();
-      ctx.arc(x, y - h * 0.2, w * 0.6, 0, Math.PI * 2);
-      ctx.arc(x - w * 0.4, y, w * 0.5, 0, Math.PI * 2);
-      ctx.arc(x + w * 0.4, y, w * 0.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    function drawCar3D(x, z, color, isPlayer = false) {
-      const roadPos = roadToScreen(x, z - gameState.roadPosition);
-      if (!roadPos) return;
-
-      const depth = (z - gameState.roadPosition) / canvas.height;
-      const scale = Math.max(0.3, 1 - depth * 0.5);
-      
-      const w = 50 * scale;
-      const h = 80 * scale;
-
-      // Shadow
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(roadPos.x - w / 2, roadPos.y + h * 0.8, w, h * 0.15);
-
-      // Car body
-      const gradient = ctx.createLinearGradient(roadPos.x - w / 2, roadPos.y, roadPos.x + w / 2, roadPos.y);
-      gradient.addColorStop(0, lighten(color, 30));
-      gradient.addColorStop(0.5, color);
-      gradient.addColorStop(1, darken(color, 30));
-
-      ctx.fillStyle = gradient;
-      roundRect(roadPos.x - w / 2, roadPos.y, w, h, 8);
-      ctx.fill();
-
-      // Windshield
-      ctx.fillStyle = 'rgba(100, 150, 255, 0.6)';
-      roundRect(roadPos.x - w * 0.35, roadPos.y + h * 0.15, w * 0.7, h * 0.25, 5);
-      ctx.fill();
-
-      // Windows
-      ctx.fillStyle = 'rgba(50, 100, 200, 0.8)';
-      ctx.fillRect(roadPos.x - w * 0.25, roadPos.y + h * 0.4, w * 0.2, h * 0.2);
-      ctx.fillRect(roadPos.x + w * 0.05, roadPos.y + h * 0.4, w * 0.2, h * 0.2);
-
-      // Headlights
-      ctx.fillStyle = '#ffff00';
-      ctx.fillRect(roadPos.x - w * 0.3, roadPos.y + h * 0.7, w * 0.2, h * 0.1);
-      ctx.fillRect(roadPos.x + w * 0.1, roadPos.y + h * 0.7, w * 0.2, h * 0.1);
-
-      if (isPlayer) {
-        // Player glow
-        ctx.strokeStyle = '#0ff';
-        ctx.lineWidth = 3;
-        ctx.globalAlpha = 0.6;
-        roundRect(roadPos.x - w / 2 - 5, roadPos.y - 5, w + 10, h + 10, 10);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-    }
-
-    function roundRect(x, y, w, h, r) {
-      ctx.beginPath();
-      ctx.moveTo(x + r, y);
-      ctx.lineTo(x + w - r, y);
-      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-      ctx.lineTo(x + w, y + h - r);
-      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-      ctx.lineTo(x + r, y + h);
-      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-      ctx.lineTo(x, y + r);
-      ctx.quadraticCurveTo(x, y, x + r, y);
-      ctx.closePath();
-    }
-
-    function lighten(color, amount) {
-      const c = parseInt(color.replace('#', ''), 16);
-      const r = Math.min(255, ((c >> 16) & 255) + amount);
-      const g = Math.min(255, ((c >> 8) & 255) + amount);
-      const b = Math.min(255, (c & 255) + amount);
-      return `rgb(${r},${g},${b})`;
-    }
-
-    function darken(color, amount) {
-      const c = parseInt(color.replace('#', ''), 16);
-      const r = Math.max(0, ((c >> 16) & 255) - amount);
-      const g = Math.max(0, ((c >> 8) & 255) - amount);
-      const b = Math.max(0, (c & 255) - amount);
-      return `rgb(${r},${g},${b})`;
     }
 
     // ==================== GAME LOGIC ====================
     function spawnObstacle() {
+      const lane = Math.floor(Math.random() * 3);
+      const colors = ['#ff6b6b', '#ff9ff3', '#54a0ff', '#48dbfb', '#1dd1a1', '#ffa502'];
+      const z = gameState.roadPosition + canvas.height + 500;
+      
       obstacles.push({
-        lane: Math.floor(Math.random() * 3),
-        z: gameState.roadPosition + canvas.height + 100,
+        lane,
+        z,
         speed: gameState.speed * (0.6 + Math.random() * 0.3),
-        color: ['#ff6b6b', '#ff9ff3', '#54a0ff', '#48dbfb', '#1dd1a1', '#ffa502'][Math.floor(Math.random() * 6)]
+        cube: new Cube(lane * 100 - 100, 10, z, 60, 30, 80, colors[Math.floor(Math.random() * colors.length)])
       });
     }
 
     function updateGame(deltaTime) {
       const dt = deltaTime / 1000;
 
-      // Speed calculation
       const baseSpeed = 150 + config.speedMult * 100;
       
       if (input.up) {
@@ -658,12 +610,10 @@
       gameState.speed += (gameState.targetSpeed - gameState.speed) * 0.1;
       gameState.roadPosition += gameState.speed * dt;
 
-      // Generate turbo
       if (!input.up && gameState.turbo < gameState.maxTurbo) {
         gameState.turbo += deltaTime * 0.02;
       }
 
-      // Lane change
       if (input.left) {
         gameState.targetLane = Math.max(0, gameState.targetLane - 1);
         input.left = false;
@@ -675,74 +625,34 @@
 
       gameState.playerLane += (gameState.targetLane - gameState.playerLane) * 0.15;
 
-      // Obstacle spawning
       if (Math.random() < 0.02 * config.trafficMult) {
         spawnObstacle();
       }
 
-      // Update obstacles
       for (let i = obstacles.length - 1; i >= 0; i--) {
         const obs = obstacles[i];
         obs.z += obs.speed * dt;
+        obs.cube.pos.z = obs.z;
 
-        if (obs.z > gameState.roadPosition + canvas.height + 200) {
+        if (obs.z > gameState.roadPosition + 1000) {
           obstacles.splice(i, 1);
           gameState.distance += 10;
           continue;
         }
 
-        // Collision
         if (!config.noCollide) {
-          const relZ = obs.z - gameState.roadPosition;
-          if (relZ > -100 && relZ < 150) {
-            const obsPosX = obs.lane * roadConfig.laneWidth - roadConfig.roadWidth / 2 + roadConfig.laneWidth / 2;
-            const playerPosX = gameState.playerLane * roadConfig.laneWidth - roadConfig.roadWidth / 2 + roadConfig.laneWidth / 2;
-            
-            if (Math.abs(obsPosX - playerPosX) < 30) {
+          if (Math.abs(obs.z - (gameState.roadPosition + 200)) < 50) {
+            if (Math.abs(obs.lane - gameState.playerLane) < 0.5) {
               gameState.crashed = true;
             }
           }
         }
       }
 
-      // Update UI
       document.getElementById('distDisplay').textContent = Math.floor(gameState.distance);
       document.getElementById('speedDisplay').textContent = Math.floor(gameState.speed * 1.5);
       document.getElementById('rpmDisplay').textContent = Math.floor((gameState.speed / 600) * 10000);
       document.getElementById('turboFill').style.width = (gameState.turbo / gameState.maxTurbo * 100) + '%';
-    }
-
-    function drawGame() {
-      drawBackground();
-      drawRoad3D();
-
-      // Draw obstacles
-      for (const obs of obstacles) {
-        drawCar3D(obs.lane * roadConfig.laneWidth - roadConfig.roadWidth / 2 + roadConfig.laneWidth / 2, obs.z, obs.color, false);
-      }
-
-      // Draw player car
-      const playerX = gameState.playerLane * roadConfig.laneWidth - roadConfig.roadWidth / 2 + roadConfig.laneWidth / 2;
-      drawCar3D(playerX, gameState.roadPosition + 200, '#0f0', true);
-
-      // Speed lines
-      if (gameState.speed > 300) {
-        ctx.strokeStyle = `rgba(0, 255, 255, ${(gameState.speed - 300) / 300 * 0.5})`;
-        ctx.lineWidth = 3;
-        for (let i = 0; i < 5; i++) {
-          const y = (gameState.roadPosition * 2 + i * 100) % canvas.height;
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(canvas.width, y);
-          ctx.stroke();
-        }
-      }
-
-      // Crash flash
-      if (gameState.crashed) {
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
     }
 
     // ==================== INPUT ====================
@@ -752,7 +662,6 @@
       if (key === 's' || key === 'arrowdown') input.down = true;
       if (key === 'a' || key === 'arrowleft') input.left = true;
       if (key === 'd' || key === 'arrowright') input.right = true;
-      if (key === ' ') input.space = true;
 
       if (key === 'enter' && gameState.mode !== 'playing') {
         startGame();
@@ -765,10 +674,9 @@
       if (key === 's' || key === 'arrowdown') input.down = false;
       if (key === 'a' || key === 'arrowleft') input.left = false;
       if (key === 'd' || key === 'arrowright') input.right = false;
-      if (key === ' ') input.space = false;
     });
 
-    // ==================== UI HANDLERS ====================
+    // ==================== UI ====================
     document.getElementById('startBtn').addEventListener('click', startGame);
     document.getElementById('retryBtn').addEventListener('click', startGame);
     document.getElementById('menuBtn').addEventListener('click', () => {
@@ -778,8 +686,8 @@
     });
 
     document.getElementById('settingsBtn').addEventListener('click', () => {
-      document.getElementById('settingsPanel').style.display = 
-        document.getElementById('settingsPanel').style.display === 'none' ? 'block' : 'none';
+      const panel = document.getElementById('settingsPanel');
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
     });
 
     document.getElementById('speedMult').addEventListener('input', (e) => {
@@ -819,7 +727,7 @@
       document.getElementById('menu').classList.add('hidden');
       document.getElementById('gameOver').classList.add('hidden');
       
-      generateRoadSegments();
+      generateRoad();
     }
 
     function endGame() {
@@ -836,7 +744,7 @@
     }
 
     // ==================== MAIN LOOP ====================
-    generateRoadSegments();
+    generateRoad();
     let lastTime = performance.now();
 
     function gameLoop(now) {
